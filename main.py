@@ -1,32 +1,32 @@
 #!/usr/bin/env python3
 """
 PDF Annotator MCP Server
-PDF 파일에서 주석(annotations)과 메모를 추출하는 기능을 제공합니다.
+A hybrid approach that provides both Resources and user-friendly Tools
+for PDF annotation extraction. This combines the best of both worlds.
 """
 
 import asyncio
 import json
 import logging
 import os
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
+from urllib.parse import unquote
 
 import PyPDF2
 import pdfplumber
-from mcp.server.fastmcp import FastMCP
+from mcp.server import Server
+from mcp.server.stdio import stdio_server
+from mcp.types import Resource, Tool, TextContent
 
+# --- Basic Configuration ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("PDFAnnotator")
+mcp = Server("PDF Annotator")
 
-# --- 기본 설정 ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
-mcp = FastMCP("PDF Annotator")
-
-# --- 보안 및 경로 설정 ---
+# --- Security and Path Configuration ---
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
 ALLOWED_EXTENSIONS = ['.pdf']
-# 파일을 검색할 기본 디렉토리 목록 (우선순위 순)
 SEARCH_DIRECTORIES = [
     os.path.expanduser("~/Downloads"),
     os.path.expanduser("~/Desktop"),
@@ -36,11 +36,11 @@ SEARCH_DIRECTORIES = [
 
 def validate_and_resolve_path(file_path: str) -> Optional[Path]:
     """
-    사용자가 제공한 파일 경로를 검증하고 절대 경로 Path 객체로 변환합니다.
-    보안(경로 순회, 심볼릭 링크, 파일 크기/확장자) 검사를 수행합니다.
+    Validates and resolves a file path to an absolute Path object.
+    Performs security checks (path traversal, symlinks, file size/extensions).
     """
     try:
-        # 1. 절대 경로로 변환 및 정규화
+        # Convert to absolute path
         if file_path.startswith('~'):
             abs_path = os.path.expanduser(file_path)
         else:
@@ -48,8 +48,7 @@ def validate_and_resolve_path(file_path: str) -> Optional[Path]:
         
         real_path = os.path.realpath(abs_path)
 
-        # 2. 경로 순회 및 심볼릭 링크 공격 방지
-        # realpath가 원래의 abspath가 허용된 디렉토리 내에서 시작하는지 확인
+        # Security check: prevent path traversal
         is_safe = False
         for allowed_dir in SEARCH_DIRECTORIES:
             if os.path.realpath(allowed_dir) in real_path:
@@ -57,57 +56,56 @@ def validate_and_resolve_path(file_path: str) -> Optional[Path]:
                 break
         
         if not is_safe or '..' in Path(file_path).parts:
-            logger.warning(f"보안 위험 감지 (경로 순회 또는 허용되지 않은 접근): {file_path}")
+            logger.warning(f"Security risk detected: {file_path}")
             return None
 
-        # 3. 파일 존재 여부 및 확장자 검증
         resolved_path = Path(real_path)
+        
+        # Check file existence and extension
         if not resolved_path.is_file():
-            return None # 파일이 아니면 None 반환 (find_file에서 처리)
+            return None
             
         if resolved_path.suffix.lower() not in ALLOWED_EXTENSIONS:
-            logger.warning(f"허용되지 않은 파일 확장자: {file_path}")
+            logger.warning(f"Disallowed file extension: {file_path}")
             return None
 
-        # 4. 파일 크기 제한 검증
+        # Check file size
         if resolved_path.stat().st_size > MAX_FILE_SIZE:
-            logger.warning(f"파일 크기 초과: {file_path}")
+            logger.warning(f"File too large: {file_path}")
             return None
 
         return resolved_path
 
     except Exception as e:
-        logger.error(f"파일 경로 검증 중 오류 발생: {file_path}, 오류: {e}")
+        logger.error(f"Error validating path {file_path}: {e}")
         return None
 
 def find_file(file_name: str) -> Optional[Path]:
     """
-    단순화된 파일 찾기 함수. 절대 경로를 우선 처리하고, 아니면 지정된 디렉토리에서 검색합니다.
+    Finds a file by name, checking absolute paths first, then searching directories.
     """
-    # 1. 절대/사용자 경로인지 확인
+    # Check if it's an absolute path
     if file_name.startswith(('/', '~')):
         path = validate_and_resolve_path(file_name)
         if path and path.exists():
             return path
             
-    # 2. 지정된 검색 디렉토리에서 순차적으로 검색
+    # Search in designated directories
     for directory in SEARCH_DIRECTORIES:
         potential_path = Path(directory) / file_name
         path = validate_and_resolve_path(str(potential_path))
         if path and path.exists():
-            logger.info(f"파일을 {path} 에서 찾았습니다.")
+            logger.info(f"Found file at {path}")
             return path
     
-    logger.warning(f"파일을 찾을 수 없습니다: {file_name}")
+    logger.warning(f"File not found: {file_name}")
     return None
 
 def get_text_within_bbox(bbox: List[float], words: List[Dict[str, Any]]) -> str:
     """
-    주어진 경계 상자(bbox) 내에 완전히 또는 부분적으로 포함된 단어들을 찾아 텍스트로 반환합니다.
+    Finds words within a bounding box and returns them as text.
     """
     x0, top, x1, bottom = bbox
-    # 하이라이트 영역이 여러 줄에 걸쳐 있을 수 있으므로, y좌표를 너그럽게 비교합니다.
-    # 단어의 중심점이 하이라이트의 수직 범위 안에 있는지 확인합니다.
     overlapping_words = [
         word for word in words
         if not (word['x1'] < x0 or word['x0'] > x1) and \
@@ -115,203 +113,342 @@ def get_text_within_bbox(bbox: List[float], words: List[Dict[str, Any]]) -> str:
            ((word['top'] + word['bottom']) / 2) <= bottom
     ]
     
-    # x 좌표 순으로 단어 정렬
     overlapping_words.sort(key=lambda w: w['x0'])
-    
     return " ".join(w['text'] for w in overlapping_words)
 
-
-# --- PDF 처리 클래스 ---
-class PDFAnnotationExtractor:
-    def __init__(self, pdf_path: Path):
-        self.pdf_path = pdf_path
-
-    def extract_annotations(self) -> List[Dict[str, Any]]:
-        """PyPDF2를 사용하여 주석을 추출합니다."""
-        annotations = []
-        try:
-            with open(self.pdf_path, 'rb') as file:
-                reader = PyPDF2.PdfReader(file)
-                for page_num, page in enumerate(reader.pages, 1):
-                    if "/Annots" in page:
-                        for annot in page["/Annots"]:
-                            obj = annot.get_object()
-                            content = obj.get("/Contents", "")
-                            subtype = obj.get("/Subtype", "Unknown")
-                            author = obj.get("/T", "")
-                            rect = obj.get("/Rect", [])
-                            
-                            annotations.append({
-                                "page": page_num,
-                                "type": str(subtype),
-                                "content": str(content),
-                                "author": str(author),
-                                "position": [float(p) for p in rect],
-                            })
-        except Exception as e:
-            logger.error(f"{self.pdf_path} 파일 주석 추출 중 오류: {e}")
-        return annotations
-
-    def extract_full_content(self) -> Dict[str, Any]:
-        """pdfplumber를 사용하여 전체 텍스트와 메타데이터를 추출합니다."""
-        content = {"metadata": {}, "pages": []}
-        try:
-            with pdfplumber.open(self.pdf_path) as pdf:
-                content["metadata"] = pdf.metadata
-                for i, page in enumerate(pdf.pages, 1):
-                    content["pages"].append({
-                        "page_number": i,
-                        "text": page.extract_text() or "",
-                    })
-        except Exception as e:
-            logger.error(f"{self.pdf_path} 파일 내용 추출 중 오류: {e}")
-        return content
-
-# --- MCP 도구 정의 ---
-@mcp.tool()
-async def extract_pdf_annotations(file_path: str) -> str:
-    """PDF 파일에서 주석(메모)을 추출하여 JSON 형식으로 반환합니다."""
-    path = find_file(file_path)
-    if not path:
-        return f"오류: '{file_path}' 파일을 찾을 수 없습니다. 절대 경로를 입력하거나 다음 위치에 파일을 두세요: Downloads, Desktop, Documents."
-
-    try:
-        extractor = PDFAnnotationExtractor(path)
-        annotations = extractor.extract_annotations()
-        if not annotations:
-            return f"'{path.name}' 파일에 주석이 없습니다."
-        
-        result = {
-            "file_name": path.name,
-            "path": str(path),
-            "total_annotations": len(annotations),
-            "annotations": annotations,
-        }
-        return json.dumps(result, indent=2, ensure_ascii=False)
-    except Exception as e:
-        logger.error(f"주석 추출 도중 오류: {e}")
-        return f"오류: {e}"
-
-@mcp.tool()
-async def extract_annotations_summary(file_path: str) -> str:
-    """PDF 파일의 주석을 사람이 읽기 좋은 형식으로 요약합니다."""
-    path = find_file(file_path)
-    if not path:
-        return f"오류: '{file_path}' 파일을 찾을 수 없습니다."
-
-    try:
-        extractor = PDFAnnotationExtractor(path)
-        annotations = extractor.extract_annotations()
-        if not annotations:
-            return f"'{path.name}' 파일에 주석이 없습니다."
-
-        summary = [f"'{path.name}' 파일 주석 요약 (총 {len(annotations)}개)", "="*40]
-        for ann in annotations:
-            summary.append(f"📄 페이지 {ann['page']} ({ann['type']})")
-            if ann.get('author'):
-                summary.append(f"  - 작성자: {ann['author']}")
-            if ann.get('content'):
-                summary.append(f"  - 내용: {ann['content'][:100]}...") # 내용이 길 경우 일부만 표시
-            summary.append("-" * 20)
-        return "\n".join(summary)
-    except Exception as e:
-        logger.error(f"주석 요약 도중 오류: {e}")
-        return f"오류: {e}"
-
-@mcp.tool()
-async def list_pdf_files(directory_name: str = "Downloads") -> str:
-    """지정된 기본 폴더(Downloads, Desktop, Documents)의 PDF 목록을 보여줍니다."""
-    dir_map = {
-        "downloads": os.path.expanduser("~/Downloads"),
-        "desktop": os.path.expanduser("~/Desktop"),
-        "documents": os.path.expanduser("~/Documents"),
-    }
+def get_unified_annotations(pdf_path: Path) -> List[Dict[str, Any]]:
+    """
+    Extracts annotations using both PyPDF2 and pdfplumber for comprehensive results.
+    """
+    base_annotations = []
     
-    target_dir_str = dir_map.get(directory_name.lower())
-    if not target_dir_str:
-        return f"오류: '{directory_name}'은(는) 허용된 폴더가 아닙니다. 'Downloads', 'Desktop', 'Documents' 중 하나를 선택하세요."
-
-    target_dir = Path(target_dir_str)
-    if not target_dir.is_dir():
-        return f"오류: '{target_dir}' 디렉토리를 찾을 수 없습니다."
-
+    # First, get basic annotation data with PyPDF2
     try:
-        pdf_files = [f for f in target_dir.glob("*.pdf") if f.is_file()]
-        if not pdf_files:
-            return f"'{directory_name}' 폴더에 PDF 파일이 없습니다."
-        
-        result = [f"'{directory_name}' 폴더의 PDF 파일 목록 ({len(pdf_files)}개):", "="*40]
-        for pdf in sorted(pdf_files, key=lambda p: p.stat().st_mtime, reverse=True)[:15]: # 최근 15개만 표시
-            result.append(f"- {pdf.name} ({pdf.stat().st_size / 1024**2:.1f} MB)")
-        return "\n".join(result)
-    except Exception as e:
-        logger.error(f"'{directory_name}' 폴더 목록 조회 중 오류: {e}")
-        return f"오류: {e}"
-
-
-@mcp.tool()
-async def extract_annotations_with_context(file_path: str) -> str:
-    """
-    PDF에서 주석과 함께, 해당 주석이 적용된 '원문 텍스트'를 정확히 추출합니다.
-    """
-    path = find_file(file_path)
-    if not path:
-        return f"오류: '{file_path}' 파일을 찾을 수 없습니다."
-
-    results = []
-    try:
-        with pdfplumber.open(path) as pdf:
-            for page_num, page in enumerate(pdf.pages, 1):
-                # 페이지의 모든 단어와 그 좌표를 미리 추출
-                words = page.extract_words()
-                
-                # pdfplumber는 /QuadPoints를 더 정확하게 처리하므로 이를 우선 사용
-                # PyPDF2의 /Rect보다 하이라이트 영역을 더 잘 표현합니다.
-                page_annots = page.annots
-                
-                if not page_annots:
-                    continue
-
-                for annot in page_annots:
-                    # 주석의 경계 상자(bounding box)를 가져옵니다.
-                    bbox = [
-                        float(annot['x0']),
-                        float(annot['top']),
-                        float(annot['x1']),
-                        float(annot['bottom'])
-                    ]
-                    
-                    # 경계 상자 내의 텍스트를 찾습니다.
-                    highlighted_text = get_text_within_bbox(bbox, words)
-                    
-                    # 주석 내용('/Contents')과 작성자('/T') 정보 추출
-                    content = annot.get('data', {}).get('contents', '')
-                    author = annot.get('data', {}).get('title', '') # pdfplumber에서는 /T를 title로 파싱
-                    
-                    # 결과가 유의미한 경우에만 추가 (예: 빈 하이라이트 제외)
-                    if highlighted_text or content:
-                        results.append({
+        with open(pdf_path, 'rb') as file:
+            reader = PyPDF2.PdfReader(file)
+            for page_num, page in enumerate(reader.pages, 1):
+                if "/Annots" in page:
+                    for annot in page["/Annots"]:
+                        obj = annot.get_object()
+                        base_annotations.append({
                             "page": page_num,
-                            "author": author,
-                            "highlighted_text": highlighted_text,
-                            "note": content,
-                            "position": bbox
+                            "type": str(obj.get("/Subtype", "Unknown")).strip('/'),
+                            "note": str(obj.get("/Contents", "")),
+                            "author": str(obj.get("/T", "")),
+                            "position": [float(p) for p in obj.get("/Rect", [])],
                         })
     except Exception as e:
-        logger.error(f"주석 및 컨텍스트 추출 중 오류: {e}")
-        return f"오류: {e}"
+        logger.error(f"PyPDF2 extraction failed for {pdf_path}: {e}")
+        return []
 
-    if not results:
-        return f"'{path.name}' 파일에서 주석을 찾을 수 없거나, 텍스트와 연결된 주석이 없습니다."
+    if not base_annotations:
+        return []
 
-    # 사람이 읽기 좋은 형식으로 최종 결과 포맷팅
-    if not results:
-        return json.dumps({"message": f"'{path.name}' 파일에서 주석을 찾을 수 없거나, 텍스트와 연결된 주석이 없습니다."})
+    # Enhance with highlighted text using pdfplumber
+    unified_annotations = []
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for base_annot in base_annotations:
+                page_index = base_annot["page"] - 1
+                if page_index < len(pdf.pages):
+                    page = pdf.pages[page_index]
+                    words = page.extract_words()
+                    highlighted_text = get_text_within_bbox(base_annot["position"], words)
+                    
+                    if highlighted_text or base_annot.get("note"):
+                        enhanced_annot = base_annot.copy()
+                        enhanced_annot["highlighted_text"] = highlighted_text
+                        unified_annotations.append(enhanced_annot)
+    except Exception as e:
+        logger.error(f"pdfplumber enhancement failed for {pdf_path}: {e}")
+        return base_annotations
 
-    # 추출된 데이터를 JSON 문자열로 변환하여 반환
-    return json.dumps(results, indent=2, ensure_ascii=False)
+    return unified_annotations
 
+# --- MCP Resource Handlers ---
+
+@mcp.list_resources()
+async def list_available_pdfs() -> List[Resource]:
+    """
+    Exposes all accessible PDF files as MCP Resources.
+    This allows clients to see and select files directly.
+    """
+    resources = {}
+    
+    for directory in SEARCH_DIRECTORIES:
+        try:
+            dir_path = Path(directory)
+            if not dir_path.exists():
+                continue
+                
+            for pdf_path in dir_path.glob('*.pdf'):
+                if pdf_path.is_file() and validate_and_resolve_path(str(pdf_path)):
+                    # Create a clean URI
+                    file_uri = pdf_path.as_uri()
+                    
+                    # Avoid duplicates
+                    if file_uri not in resources:
+                        resources[file_uri] = Resource(
+                            uri=file_uri,
+                            name=pdf_path.name,
+                            description=f"PDF file in {dir_path.name} folder",
+                            mimeType="application/pdf"
+                        )
+        except Exception as e:
+            logger.error(f"Error listing resources in {directory}: {e}")
+    
+    return list(resources.values())
+
+@mcp.read_resource()
+async def read_resource(uri: str) -> str:
+    """
+    Reads a PDF resource and returns its annotation data.
+    This is called when a client accesses a resource URI.
+    """
+    try:
+        # Parse the URI to get the file path
+        if not uri.startswith('file://'):
+            raise ValueError("Only file:// URIs are supported")
+        
+        # Decode the URI path
+        file_path = unquote(uri[7:])  # Remove 'file://' prefix
+        pdf_path = Path(file_path)
+        
+        # Validate the path
+        if not validate_and_resolve_path(str(pdf_path)):
+            raise ValueError(f"Invalid or inaccessible file: {uri}")
+        
+        # Extract annotations
+        annotations = get_unified_annotations(pdf_path)
+        
+        if not annotations:
+            return json.dumps({
+                "file_name": pdf_path.name,
+                "message": "No annotations found in this PDF file."
+            }, ensure_ascii=False)
+        
+        return json.dumps({
+            "file_name": pdf_path.name,
+            "total_annotations": len(annotations),
+            "annotations": annotations
+        }, indent=2, ensure_ascii=False)
+        
+    except Exception as e:
+        logger.error(f"Error reading resource {uri}: {e}")
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+# --- MCP Tool Handlers ---
+
+@mcp.list_tools()
+async def list_tools() -> List[Tool]:
+    """
+    Defines the tools available for PDF annotation extraction.
+    """
+    return [
+        Tool(
+            name="find_and_extract_annotations",
+            description="Find a PDF file by name/keyword and extract its annotations with highlighted text",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_name_or_keyword": {
+                        "type": "string",
+                        "description": "PDF file name or keyword to search for (e.g., 'interview', 'CS면접원고.pdf')"
+                    }
+                },
+                "required": ["file_name_or_keyword"]
+            }
+        ),
+        Tool(
+            name="list_pdf_files",
+            description="List all available PDF files in the accessible directories",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "directory": {
+                        "type": "string",
+                        "description": "Directory to search in (Downloads, Desktop, Documents, or 'all')",
+                        "enum": ["Downloads", "Desktop", "Documents", "all"]
+                    }
+                },
+                "required": []
+            }
+        ),
+        Tool(
+            name="extract_annotations_from_uri",
+            description="Extract annotations from a specific PDF file URI (from the resource list)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "resource_uri": {
+                        "type": "string",
+                        "description": "The file:// URI of the PDF resource"
+                    }
+                },
+                "required": ["resource_uri"]
+            }
+        )
+    ]
+
+@mcp.call_tool()
+async def call_tool(name: str, arguments: dict) -> Sequence[TextContent]:
+    """
+    Handles tool execution for PDF annotation extraction.
+    """
+    try:
+        if name == "find_and_extract_annotations":
+            file_name_or_keyword = arguments.get("file_name_or_keyword", "")
+            
+            # First, try to find the file directly
+            pdf_path = find_file(file_name_or_keyword)
+            
+            # If not found, search by keyword
+            if not pdf_path:
+                for directory in SEARCH_DIRECTORIES:
+                    try:
+                        for potential_file in Path(directory).glob('*.pdf'):
+                            if file_name_or_keyword.lower() in potential_file.name.lower():
+                                pdf_path = validate_and_resolve_path(str(potential_file))
+                                if pdf_path:
+                                    break
+                        if pdf_path:
+                            break
+                    except Exception:
+                        continue
+            
+            if not pdf_path:
+                return [TextContent(
+                    type="text",
+                    text=f"Could not find PDF file matching '{file_name_or_keyword}'. Please check the filename or use the list_pdf_files tool to see available files."
+                )]
+            
+            # Extract annotations
+            annotations = get_unified_annotations(pdf_path)
+            
+            if not annotations:
+                return [TextContent(
+                    type="text",
+                    text=f"No annotations found in '{pdf_path.name}'"
+                )]
+            
+            # Format the results in a user-friendly way
+            result = {
+                "file_name": pdf_path.name,
+                "file_path": str(pdf_path),
+                "total_annotations": len(annotations),
+                "annotations": annotations
+            }
+            
+            return [TextContent(
+                type="text",
+                text=json.dumps(result, indent=2, ensure_ascii=False)
+            )]
+        
+        elif name == "list_pdf_files":
+            directory = arguments.get("directory", "all")
+            
+            if directory == "all":
+                search_dirs = SEARCH_DIRECTORIES
+            else:
+                dir_map = {
+                    "Downloads": os.path.expanduser("~/Downloads"),
+                    "Desktop": os.path.expanduser("~/Desktop"),
+                    "Documents": os.path.expanduser("~/Documents")
+                }
+                search_dirs = [dir_map.get(directory, directory)]
+            
+            all_files = []
+            for dir_path in search_dirs:
+                try:
+                    for pdf_file in Path(dir_path).glob('*.pdf'):
+                        if pdf_file.is_file() and validate_and_resolve_path(str(pdf_file)):
+                            all_files.append({
+                                "name": pdf_file.name,
+                                "path": str(pdf_file),
+                                "directory": Path(dir_path).name,
+                                "size_mb": round(pdf_file.stat().st_size / (1024*1024), 2)
+                            })
+                except Exception as e:
+                    logger.error(f"Error listing files in {dir_path}: {e}")
+            
+            if not all_files:
+                return [TextContent(
+                    type="text",
+                    text="No PDF files found in the accessible directories."
+                )]
+            
+            # Sort by modification time (most recent first)
+            all_files.sort(key=lambda x: Path(x["path"]).stat().st_mtime, reverse=True)
+            
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "total_files": len(all_files),
+                    "files": all_files
+                }, indent=2, ensure_ascii=False)
+            )]
+        
+        elif name == "extract_annotations_from_uri":
+            resource_uri = arguments.get("resource_uri", "")
+            
+            if not resource_uri.startswith('file://'):
+                return [TextContent(
+                    type="text",
+                    text="Invalid URI format. Must be a file:// URI."
+                )]
+            
+            # Use the same logic as read_resource but return as tool result
+            file_path = unquote(resource_uri[7:])
+            pdf_path = Path(file_path)
+            
+            if not validate_and_resolve_path(str(pdf_path)):
+                return [TextContent(
+                    type="text",
+                    text=f"Invalid or inaccessible file: {resource_uri}"
+                )]
+            
+            annotations = get_unified_annotations(pdf_path)
+            
+            if not annotations:
+                return [TextContent(
+                    type="text",
+                    text=f"No annotations found in '{pdf_path.name}'"
+                )]
+            
+            result = {
+                "file_name": pdf_path.name,
+                "total_annotations": len(annotations),
+                "annotations": annotations
+            }
+            
+            return [TextContent(
+                type="text",
+                text=json.dumps(result, indent=2, ensure_ascii=False)
+            )]
+        
+        else:
+            raise ValueError(f"Unknown tool: {name}")
+            
+    except Exception as e:
+        logger.error(f"Error in tool {name}: {e}")
+        return [TextContent(
+            type="text",
+            text=f"Error: {str(e)}"
+        )]
+
+# --- Main Server Execution ---
+async def main():
+    """
+    Sets up and runs the MCP server with both Resources and Tools.
+    """
+    logger.info("Starting PDF Annotator MCP Server (Hybrid Version)...")
+    
+    # Create server initialization options
+    options = mcp.create_initialization_options()
+    
+    # Run the server
+    async with stdio_server() as (read_stream, write_stream):
+        await mcp.run(read_stream, write_stream, options)
 
 if __name__ == "__main__":
-    logger.info("PDF Annotator MCP 서버를 시작합니다...")
-    mcp.run(transport='stdio')
+    asyncio.run(main())
