@@ -16,6 +16,7 @@ import PyPDF2
 import pdfplumber
 from mcp.server.fastmcp import FastMCP
 
+
 # --- 기본 설정 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -99,6 +100,26 @@ def find_file(file_name: str) -> Optional[Path]:
     
     logger.warning(f"파일을 찾을 수 없습니다: {file_name}")
     return None
+
+def get_text_within_bbox(bbox: List[float], words: List[Dict[str, Any]]) -> str:
+    """
+    주어진 경계 상자(bbox) 내에 완전히 또는 부분적으로 포함된 단어들을 찾아 텍스트로 반환합니다.
+    """
+    x0, top, x1, bottom = bbox
+    # 하이라이트 영역이 여러 줄에 걸쳐 있을 수 있으므로, y좌표를 너그럽게 비교합니다.
+    # 단어의 중심점이 하이라이트의 수직 범위 안에 있는지 확인합니다.
+    overlapping_words = [
+        word for word in words
+        if not (word['x1'] < x0 or word['x0'] > x1) and \
+           ((word['top'] + word['bottom']) / 2) >= top and \
+           ((word['top'] + word['bottom']) / 2) <= bottom
+    ]
+    
+    # x 좌표 순으로 단어 정렬
+    overlapping_words.sort(key=lambda w: w['x0'])
+    
+    return " ".join(w['text'] for w in overlapping_words)
+
 
 # --- PDF 처리 클래스 ---
 class PDFAnnotationExtractor:
@@ -226,6 +247,76 @@ async def list_pdf_files(directory_name: str = "Downloads") -> str:
     except Exception as e:
         logger.error(f"'{directory_name}' 폴더 목록 조회 중 오류: {e}")
         return f"오류: {e}"
+
+
+@mcp.tool()
+async def extract_annotations_with_context(file_path: str) -> str:
+    """
+    PDF에서 주석과 함께, 해당 주석이 적용된 '원문 텍스트'를 정확히 추출합니다.
+    """
+    path = find_file(file_path)
+    if not path:
+        return f"오류: '{file_path}' 파일을 찾을 수 없습니다."
+
+    results = []
+    try:
+        with pdfplumber.open(path) as pdf:
+            for page_num, page in enumerate(pdf.pages, 1):
+                # 페이지의 모든 단어와 그 좌표를 미리 추출
+                words = page.extract_words()
+                
+                # pdfplumber는 /QuadPoints를 더 정확하게 처리하므로 이를 우선 사용
+                # PyPDF2의 /Rect보다 하이라이트 영역을 더 잘 표현합니다.
+                page_annots = page.annots
+                
+                if not page_annots:
+                    continue
+
+                for annot in page_annots:
+                    # 주석의 경계 상자(bounding box)를 가져옵니다.
+                    bbox = [
+                        float(annot['x0']),
+                        float(annot['top']),
+                        float(annot['x1']),
+                        float(annot['bottom'])
+                    ]
+                    
+                    # 경계 상자 내의 텍스트를 찾습니다.
+                    highlighted_text = get_text_within_bbox(bbox, words)
+                    
+                    # 주석 내용('/Contents')과 작성자('/T') 정보 추출
+                    content = annot.get('data', {}).get('contents', '')
+                    author = annot.get('data', {}).get('title', '') # pdfplumber에서는 /T를 title로 파싱
+                    
+                    # 결과가 유의미한 경우에만 추가 (예: 빈 하이라이트 제외)
+                    if highlighted_text or content:
+                        results.append({
+                            "page": page_num,
+                            "author": author,
+                            "highlighted_text": highlighted_text,
+                            "note": content,
+                            "position": bbox
+                        })
+    except Exception as e:
+        logger.error(f"주석 및 컨텍스트 추출 중 오류: {e}")
+        return f"오류: {e}"
+
+    if not results:
+        return f"'{path.name}' 파일에서 주석을 찾을 수 없거나, 텍스트와 연결된 주석이 없습니다."
+
+    # 사람이 읽기 좋은 형식으로 최종 결과 포맷팅
+    output = [f"✅ '{path.name}' 파일의 주석 및 컨텍스트 분석 결과:", "="*50]
+    for res in results:
+        output.append(f"📄 페이지 {res['page']}:")
+        if res['highlighted_text']:
+            output.append(f"  - 짚어낸 구절: \"{res['highlighted_text']}\"")
+        if res['note']:
+            output.append(f"  - 남긴 메모: {res['note']}")
+        if res['author']:
+            output.append(f"  - 작성자: {res['author']}")
+        output.append("-" * 30)
+        
+    return "\n".join(output)
 
 
 if __name__ == "__main__":
