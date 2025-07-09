@@ -155,19 +155,25 @@ All tools use the same core functions:
 - ✅ Security validation and Unicode support
 - 🔄 **Next**: Improved annotation type support (shapes, stamps, etc.)
 
-### Phase 2: AI-Assisted Review Features
+### Phase 2: Text Reading and Analysis
+- 📖 **Page Text Extraction**: Read specific pages or entire documents
+- 🔍 **Metadata Extraction**: Get document titles, authors, creation dates
+- 📄 **First Page Analysis**: Extract titles and abstracts from academic papers
+- 🎯 **Selective Reading**: Read specific page ranges efficiently
+
+### Phase 3: AI-Assisted Review Features
 - 📋 **Text Analysis Tools**: Extract and summarize document content
 - 🔍 **Content Search**: Find specific topics or keywords within PDFs
 - 📊 **Document Insights**: Generate summaries of annotation patterns
 - 🏷️ **Smart Categorization**: Classify annotations by type and importance
 
-### Phase 3: Annotation Writing Capabilities
+### Phase 4: Annotation Writing Capabilities
 - ✍️ **Add Annotations**: Create highlights, notes, and comments programmatically
 - 🎯 **AI-Powered Markup**: Let AI agents review and annotate documents
 - 📝 **Template Annotations**: Pre-defined annotation patterns for common review tasks
 - 🔄 **Batch Processing**: Annotate multiple documents with consistent criteria
 
-### Phase 4: Advanced Integration
+### Phase 5: Advanced Integration
 - 🤝 **Multi-format Support**: Extend beyond PDF to other document types
 - 🌐 **Cloud Integration**: Work with cloud-stored documents
 - 👥 **Collaborative Features**: Support multi-user annotation workflows

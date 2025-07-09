@@ -2,7 +2,7 @@
 """
 PDF Annotator MCP Server
 A hybrid approach that provides both Resources and user-friendly Tools
-for PDF annotation extraction. This combines the best of both worlds.
+for PDF annotation extraction and text reading. This combines the best of both worlds.
 """
 
 import asyncio
@@ -165,6 +165,76 @@ def get_unified_annotations(pdf_path: Path) -> List[Dict[str, Any]]:
 
     return unified_annotations
 
+def extract_pdf_text(pdf_path: Path, page_range: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Extracts text from PDF pages with optional page range specification.
+    
+    Args:
+        pdf_path: Path to the PDF file
+        page_range: Page specification like "1", "1-3", "first", "last", or None for all pages
+    
+    Returns:
+        Dictionary with extracted text and metadata
+    """
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            total_pages = len(pdf.pages)
+            
+            # Parse page range
+            if page_range is None:
+                pages_to_extract = list(range(total_pages))
+            elif page_range.lower() == "first":
+                pages_to_extract = [0]
+            elif page_range.lower() == "last":
+                pages_to_extract = [total_pages - 1]
+            elif "-" in page_range:
+                try:
+                    start, end = map(int, page_range.split("-"))
+                    pages_to_extract = list(range(start - 1, min(end, total_pages)))
+                except ValueError:
+                    raise ValueError(f"Invalid page range format: {page_range}")
+            else:
+                try:
+                    page_num = int(page_range)
+                    if 1 <= page_num <= total_pages:
+                        pages_to_extract = [page_num - 1]
+                    else:
+                        raise ValueError(f"Page {page_num} out of range (1-{total_pages})")
+                except ValueError as e:
+                    raise ValueError(f"Invalid page specification: {page_range}")
+            
+            # Extract text from specified pages
+            extracted_pages = []
+            for page_index in pages_to_extract:
+                page = pdf.pages[page_index]
+                text = page.extract_text() or ""
+                extracted_pages.append({
+                    "page_number": page_index + 1,
+                    "text": text.strip(),
+                    "char_count": len(text)
+                })
+            
+            # Get basic metadata
+            metadata = pdf.metadata or {}
+            
+            return {
+                "file_name": pdf_path.name,
+                "total_pages": total_pages,
+                "extracted_pages": extracted_pages,
+                "page_range": page_range or "all",
+                "metadata": {
+                    "title": metadata.get("Title", ""),
+                    "author": metadata.get("Author", ""),
+                    "subject": metadata.get("Subject", ""),
+                    "creator": metadata.get("Creator", ""),
+                    "creation_date": str(metadata.get("CreationDate", ""))
+                }
+            }
+            
+    except Exception as e:
+        logger.error(f"Text extraction failed for {pdf_path}: {e}")
+        raise
+
 # --- MCP Resource Handlers ---
 
 @mcp.list_resources()
@@ -242,7 +312,7 @@ async def read_resource(uri: str) -> str:
 @mcp.list_tools()
 async def list_tools() -> List[Tool]:
     """
-    Defines the tools available for PDF annotation extraction.
+    Defines the tools available for PDF processing.
     """
     return [
         Tool(
@@ -253,7 +323,26 @@ async def list_tools() -> List[Tool]:
                 "properties": {
                     "file_name_or_keyword": {
                         "type": "string",
-                        "description": "PDF file name or keyword to search for (e.g., 'interview', 'CS면접원고.pdf')"
+                        "description": "PDF file name or keyword to search for (e.g., 'research', 'contract.pdf')"
+                    }
+                },
+                "required": ["file_name_or_keyword"]
+            }
+        ),
+        Tool(
+            name="read_pdf_text",
+            description="Extract text content from PDF pages. Useful for getting document titles, content analysis, or reading specific sections",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_name_or_keyword": {
+                        "type": "string",
+                        "description": "PDF file name or keyword to search for"
+                    },
+                    "page_range": {
+                        "type": "string",
+                        "description": "Page specification: 'first' (page 1), 'last' (final page), '3' (page 3), '1-5' (pages 1-5), or omit for all pages",
+                        "default": "first"
                     }
                 },
                 "required": ["file_name_or_keyword"]
@@ -293,13 +382,13 @@ async def list_tools() -> List[Tool]:
 @mcp.call_tool()
 async def call_tool(name: str, arguments: dict) -> Sequence[TextContent]:
     """
-    Handles tool execution for PDF annotation extraction.
+    Handles tool execution for PDF processing.
     """
     try:
         if name == "find_and_extract_annotations":
             file_name_or_keyword = arguments.get("file_name_or_keyword", "")
             
-            # First, try to find the file directly
+            # Find the file
             pdf_path = find_file(file_name_or_keyword)
             
             # If not found, search by keyword
@@ -331,7 +420,7 @@ async def call_tool(name: str, arguments: dict) -> Sequence[TextContent]:
                     text=f"No annotations found in '{pdf_path.name}'"
                 )]
             
-            # Format the results in a user-friendly way
+            # Format the results
             result = {
                 "file_name": pdf_path.name,
                 "file_path": str(pdf_path),
@@ -343,6 +432,46 @@ async def call_tool(name: str, arguments: dict) -> Sequence[TextContent]:
                 type="text",
                 text=json.dumps(result, indent=2, ensure_ascii=False)
             )]
+        
+        elif name == "read_pdf_text":
+            file_name_or_keyword = arguments.get("file_name_or_keyword", "")
+            page_range = arguments.get("page_range", "first")
+            
+            # Find the file
+            pdf_path = find_file(file_name_or_keyword)
+            
+            # If not found, search by keyword
+            if not pdf_path:
+                for directory in SEARCH_DIRECTORIES:
+                    try:
+                        for potential_file in Path(directory).glob('*.pdf'):
+                            if file_name_or_keyword.lower() in potential_file.name.lower():
+                                pdf_path = validate_and_resolve_path(str(potential_file))
+                                if pdf_path:
+                                    break
+                        if pdf_path:
+                            break
+                    except Exception:
+                        continue
+            
+            if not pdf_path:
+                return [TextContent(
+                    type="text",
+                    text=f"Could not find PDF file matching '{file_name_or_keyword}'. Please check the filename or use the list_pdf_files tool to see available files."
+                )]
+            
+            # Extract text
+            try:
+                result = extract_pdf_text(pdf_path, page_range)
+                return [TextContent(
+                    type="text",
+                    text=json.dumps(result, indent=2, ensure_ascii=False)
+                )]
+            except Exception as e:
+                return [TextContent(
+                    type="text",
+                    text=f"Error extracting text from '{pdf_path.name}': {str(e)}"
+                )]
         
         elif name == "list_pdf_files":
             directory = arguments.get("directory", "all")
@@ -441,7 +570,7 @@ async def main():
     """
     Sets up and runs the MCP server with both Resources and Tools.
     """
-    logger.info("Starting PDF Annotator MCP Server (Hybrid Version)...")
+    logger.info("Starting PDF Annotator MCP Server (Enhanced Version)...")
     
     # Create server initialization options
     options = mcp.create_initialization_options()
