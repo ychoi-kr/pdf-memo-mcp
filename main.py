@@ -305,18 +305,11 @@ async def extract_annotations_with_context(file_path: str) -> str:
         return f"'{path.name}' 파일에서 주석을 찾을 수 없거나, 텍스트와 연결된 주석이 없습니다."
 
     # 사람이 읽기 좋은 형식으로 최종 결과 포맷팅
-    output = [f"✅ '{path.name}' 파일의 주석 및 컨텍스트 분석 결과:", "="*50]
-    for res in results:
-        output.append(f"📄 페이지 {res['page']}:")
-        if res['highlighted_text']:
-            output.append(f"  - 짚어낸 구절: \"{res['highlighted_text']}\"")
-        if res['note']:
-            output.append(f"  - 남긴 메모: {res['note']}")
-        if res['author']:
-            output.append(f"  - 작성자: {res['author']}")
-        output.append("-" * 30)
-        
-    return "\n".join(output)
+    if not results:
+        return json.dumps({"message": f"'{path.name}' 파일에서 주석을 찾을 수 없거나, 텍스트와 연결된 주석이 없습니다."})
+
+    # 추출된 데이터를 JSON 문자열로 변환하여 반환
+    return json.dumps(results, indent=2, ensure_ascii=False)
 
 
 if __name__ == "__main__":
