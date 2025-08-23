@@ -5,10 +5,12 @@ A hybrid approach that provides both Resources and user-friendly Tools
 for PDF annotation extraction and text reading. This combines the best of both worlds.
 """
 
+import argparse
 import asyncio
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 from urllib.parse import unquote
@@ -27,12 +29,122 @@ mcp = Server("PDF Annotator")
 # --- Security and Path Configuration ---
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
 ALLOWED_EXTENSIONS = ['.pdf']
-SEARCH_DIRECTORIES = [
-    os.path.expanduser("~/Downloads"),
-    os.path.expanduser("~/Desktop"),
-    os.path.expanduser("~/Documents"),
-    os.getcwd(),
-]
+
+# Global variable to hold allowed directories (will be set from command line args)
+SEARCH_DIRECTORIES = []
+
+def parse_arguments():
+    """Parse command line arguments for configurable directories."""
+    parser = argparse.ArgumentParser(
+        description="PDF Annotator MCP Server - AI agent PDF processing with annotation extraction",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python main.py ~/Downloads ~/Documents
+  python main.py /path/to/pdfs
+  python main.py --allow-dir ~/Downloads --allow-dir ~/Work/PDFs
+  
+The server will only access PDF files within the specified directories.
+At least one directory must be provided for security reasons.
+        """
+    )
+    
+    # Method 1: Positional arguments (like filesystem server)
+    parser.add_argument(
+        'directories',
+        nargs='*',
+        help='Accessible directories for PDF files (space-separated)'
+    )
+    
+    # Method 2: Named arguments for explicit configuration  
+    parser.add_argument(
+        '--allow-dir',
+        action='append',
+        dest='allowed_dirs',
+        help='Add an allowed directory (can be used multiple times)'
+    )
+    
+    # Additional options
+    parser.add_argument(
+        '--max-file-size',
+        type=int,
+        default=100 * 1024 * 1024,
+        help='Maximum file size in bytes (default: 100MB)'
+    )
+    
+    parser.add_argument(
+        '--log-level',
+        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+        default='INFO',
+        help='Set logging level (default: INFO)'
+    )
+    
+    args = parser.parse_args()
+    
+    # Combine positional and named directory arguments
+    all_directories = []
+    if args.directories:
+        all_directories.extend(args.directories)
+    if args.allowed_dirs:
+        all_directories.extend(args.allowed_dirs)
+    
+    # Validate that at least one directory is provided
+    if not all_directories:
+        print("Error: At least one accessible directory must be specified!", file=sys.stderr)
+        print("Usage examples:", file=sys.stderr)
+        print("  python main.py ~/Downloads ~/Documents", file=sys.stderr)
+        print("  python main.py --allow-dir ~/Downloads --allow-dir ~/Work", file=sys.stderr)
+        sys.exit(1)
+    
+    return args, all_directories
+
+def setup_search_directories(directories: List[str], max_file_size: int):
+    """
+    Set up and validate search directories from command line arguments.
+    """
+    global SEARCH_DIRECTORIES, MAX_FILE_SIZE
+    
+    MAX_FILE_SIZE = max_file_size
+    validated_dirs = []
+    
+    for directory in directories:
+        try:
+            # Expand user home directory (~)
+            expanded_path = os.path.expanduser(directory)
+            # Convert to absolute path
+            abs_path = os.path.abspath(expanded_path)
+            # Resolve any symlinks for security
+            real_path = os.path.realpath(abs_path)
+            
+            # Check if directory exists
+            if not os.path.exists(real_path):
+                logger.warning(f"Directory does not exist: {directory} -> {real_path}")
+                logger.info(f"Creating directory: {real_path}")
+                os.makedirs(real_path, exist_ok=True)
+            
+            # Check if it's actually a directory
+            if not os.path.isdir(real_path):
+                logger.error(f"Path is not a directory: {directory} -> {real_path}")
+                continue
+            
+            # Check if we can read the directory
+            if not os.access(real_path, os.R_OK):
+                logger.error(f"Cannot read directory: {directory} -> {real_path}")
+                continue
+            
+            validated_dirs.append(real_path)
+            logger.info(f"Added accessible directory: {real_path}")
+            
+        except Exception as e:
+            logger.error(f"Error processing directory '{directory}': {e}")
+            continue
+    
+    if not validated_dirs:
+        logger.error("No valid directories found! Server cannot operate.")
+        sys.exit(1)
+    
+    SEARCH_DIRECTORIES = validated_dirs
+    logger.info(f"Server configured with {len(SEARCH_DIRECTORIES)} accessible directories")
 
 def validate_and_resolve_path(file_path: str) -> Optional[Path]:
     """
@@ -51,12 +163,12 @@ def validate_and_resolve_path(file_path: str) -> Optional[Path]:
         # Security check: prevent path traversal
         is_safe = False
         for allowed_dir in SEARCH_DIRECTORIES:
-            if os.path.realpath(allowed_dir) in real_path:
+            if real_path.startswith(allowed_dir + os.sep) or real_path == allowed_dir:
                 is_safe = True
                 break
         
         if not is_safe or '..' in Path(file_path).parts:
-            logger.warning(f"Security risk detected: {file_path}")
+            logger.warning(f"Security risk detected - path outside allowed directories: {file_path}")
             return None
 
         resolved_path = Path(real_path)
@@ -71,7 +183,7 @@ def validate_and_resolve_path(file_path: str) -> Optional[Path]:
 
         # Check file size
         if resolved_path.stat().st_size > MAX_FILE_SIZE:
-            logger.warning(f"File too large: {file_path}")
+            logger.warning(f"File too large: {file_path} ({resolved_path.stat().st_size} bytes)")
             return None
 
         return resolved_path
@@ -84,21 +196,35 @@ def find_file(file_name: str) -> Optional[Path]:
     """
     Finds a file by name, checking absolute paths first, then searching directories.
     """
-    # Check if it's an absolute path
-    if file_name.startswith(('/', '~')):
-        path = validate_and_resolve_path(file_name)
-        if path and path.exists():
-            return path
-            
-    # Search in designated directories
-    for directory in SEARCH_DIRECTORIES:
-        potential_path = Path(directory) / file_name
-        path = validate_and_resolve_path(str(potential_path))
-        if path and path.exists():
-            logger.info(f"Found file at {path}")
-            return path
+    # If it looks like an absolute path, try it directly
+    if os.path.isabs(file_name) or file_name.startswith('~'):
+        result = validate_and_resolve_path(file_name)
+        if result:
+            return result
     
-    logger.warning(f"File not found: {file_name}")
+    # Search in all allowed directories
+    for directory in SEARCH_DIRECTORIES:
+        try:
+            dir_path = Path(directory)
+            
+            # Direct match
+            potential_path = dir_path / file_name
+            if potential_path.is_file():
+                result = validate_and_resolve_path(str(potential_path))
+                if result:
+                    return result
+            
+            # Search by keyword/partial name
+            for pdf_file in dir_path.glob('*.pdf'):
+                if file_name.lower() in pdf_file.name.lower():
+                    result = validate_and_resolve_path(str(pdf_file))
+                    if result:
+                        return result
+                        
+        except Exception as e:
+            logger.error(f"Error searching in directory {directory}: {e}")
+            continue
+    
     return None
 
 def get_text_within_bbox(bbox: List[float], words: List[Dict[str, Any]]) -> str:
@@ -294,7 +420,8 @@ async def read_resource(uri: str) -> str:
         if not annotations:
             return json.dumps({
                 "file_name": pdf_path.name,
-                "message": "No annotations found in this PDF file."
+                "message": "No annotations found in this PDF file.",
+                "accessible_directories": SEARCH_DIRECTORIES
             }, ensure_ascii=False)
         
         return json.dumps({
@@ -356,10 +483,19 @@ async def list_tools() -> List[Tool]:
                 "properties": {
                     "directory": {
                         "type": "string",
-                        "description": "Directory to search in (Downloads, Desktop, Documents, or 'all')",
-                        "enum": ["Downloads", "Desktop", "Documents", "all"]
+                        "description": "Directory to search in or 'all' for all directories",
+                        "enum": ["all"] + [os.path.basename(d) for d in SEARCH_DIRECTORIES]
                     }
                 },
+                "required": []
+            }
+        ),
+        Tool(
+            name="show_accessible_directories",
+            description="Show the currently configured accessible directories",
+            inputSchema={
+                "type": "object",
+                "properties": {},
                 "required": []
             }
         ),
@@ -474,56 +610,76 @@ async def call_tool(name: str, arguments: dict) -> Sequence[TextContent]:
                 )]
         
         elif name == "list_pdf_files":
-            directory = arguments.get("directory", "all")
+            directory_filter = arguments.get("directory", "all")
             
-            if directory == "all":
-                search_dirs = SEARCH_DIRECTORIES
-            else:
-                dir_map = {
-                    "Downloads": os.path.expanduser("~/Downloads"),
-                    "Desktop": os.path.expanduser("~/Desktop"),
-                    "Documents": os.path.expanduser("~/Documents")
-                }
-                search_dirs = [dir_map.get(directory, directory)]
+            files_by_directory = {}
+            total_files = 0
             
-            all_files = []
-            for dir_path in search_dirs:
+            for directory in SEARCH_DIRECTORIES:
                 try:
-                    for pdf_file in Path(dir_path).glob('*.pdf'):
-                        if pdf_file.is_file() and validate_and_resolve_path(str(pdf_file)):
-                            all_files.append({
-                                "name": pdf_file.name,
-                                "path": str(pdf_file),
-                                "directory": Path(dir_path).name,
-                                "size_mb": round(pdf_file.stat().st_size / (1024*1024), 2)
-                            })
+                    dir_name = os.path.basename(directory) or directory
+                    
+                    # Skip if user requested specific directory and this isn't it
+                    if directory_filter != "all" and dir_name != directory_filter:
+                        continue
+                    
+                    dir_path = Path(directory)
+                    pdf_files = []
+                    
+                    if dir_path.exists():
+                        for pdf_file in dir_path.glob('*.pdf'):
+                            if validate_and_resolve_path(str(pdf_file)):
+                                stat = pdf_file.stat()
+                                pdf_files.append({
+                                    "name": pdf_file.name,
+                                    "size_bytes": stat.st_size,
+                                    "size_mb": round(stat.st_size / (1024 * 1024), 2),
+                                    "modified": stat.st_mtime
+                                })
+                                total_files += 1
+                    
+                    if pdf_files or directory_filter != "all":
+                        files_by_directory[directory] = {
+                            "directory_name": dir_name,
+                            "pdf_count": len(pdf_files),
+                            "files": sorted(pdf_files, key=lambda x: x["name"])
+                        }
+                        
                 except Exception as e:
-                    logger.error(f"Error listing files in {dir_path}: {e}")
+                    logger.error(f"Error listing files in {directory}: {e}")
+                    continue
             
-            if not all_files:
-                return [TextContent(
-                    type="text",
-                    text="No PDF files found in the accessible directories."
-                )]
-            
-            # Sort by modification time (most recent first)
-            all_files.sort(key=lambda x: Path(x["path"]).stat().st_mtime, reverse=True)
+            result = {
+                "total_accessible_directories": len(SEARCH_DIRECTORIES),
+                "accessible_directories": SEARCH_DIRECTORIES,
+                "total_pdf_files": total_files,
+                "files_by_directory": files_by_directory
+            }
             
             return [TextContent(
                 type="text",
-                text=json.dumps({
-                    "total_files": len(all_files),
-                    "files": all_files
-                }, indent=2, ensure_ascii=False)
+                text=json.dumps(result, indent=2, ensure_ascii=False)
             )]
         
-        elif name == "extract_annotations_from_uri":
-            resource_uri = arguments.get("resource_uri", "")
+        elif name == "show_accessible_directories":
+            result = {
+                "accessible_directories": SEARCH_DIRECTORIES,
+                "directory_count": len(SEARCH_DIRECTORIES),
+                "max_file_size_mb": MAX_FILE_SIZE // (1024 * 1024),
+                "allowed_extensions": ALLOWED_EXTENSIONS
+            }
             
-            if not resource_uri.startswith('file://'):
+            return [TextContent(
+                type="text",
+                text=json.dumps(result, indent=2, ensure_ascii=False)
+            )]
+            
+        elif name == "extract_annotations_from_uri":
+            resource_uri = arguments.get("resource_uri")
+            if not resource_uri:
                 return [TextContent(
                     type="text",
-                    text="Invalid URI format. Must be a file:// URI."
+                    text="Error: resource_uri is required. Must be a file:// URI."
                 )]
             
             # Use the same logic as read_resource but return as tool result
@@ -570,7 +726,18 @@ async def main():
     """
     Sets up and runs the MCP server with both Resources and Tools.
     """
-    logger.info("Starting PDF Annotator MCP Server (Enhanced Version)...")
+    # Parse command line arguments
+    args, directories = parse_arguments()
+    
+    # Set up logging
+    logging.getLogger().setLevel(getattr(logging, args.log_level))
+    
+    # Configure accessible directories
+    setup_search_directories(directories, args.max_file_size)
+    
+    logger.info("Starting PDF Annotator MCP Server (Configurable Version)...")
+    logger.info(f"Accessible directories: {SEARCH_DIRECTORIES}")
+    logger.info(f"Maximum file size: {MAX_FILE_SIZE // (1024 * 1024)} MB")
     
     # Create server initialization options
     options = mcp.create_initialization_options()
