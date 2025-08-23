@@ -4,10 +4,10 @@ from typing import Optional, Set
 
 from mcp.server.fastmcp import FastMCP
 
+from pdf_annotator.core import paths as _paths
 from pdf_annotator.core.paths import (
     find_file,
     list_pdf_files_text,
-    SEARCH_DIRECTORIES,
     MAX_FILE_SIZE,
     ALLOWED_EXTENSIONS,
 )
@@ -155,20 +155,54 @@ async def read_pdf_text(file_path: str, page_range: Optional[str] = None) -> str
 
 
 @mcp.tool()
-async def list_pdf_files(directory: str = "all") -> str:
-    """List PDFs under the configured accessible directories.
-
-    Outputs a simple human-readable English list.
+async def list_pdf_files(directory: str = "all", depth: int = 0, limit: int = 50) -> str:
     """
-    return list_pdf_files_text(directory)
+    List PDFs under the configured directories.
+
+    Parameters
+    ----------
+    directory : str, default "all"
+        "all" → scan every allowed root (many MCP hosts send this by default).
+        Otherwise, this is a substring filter applied to each allowed root:
+        - First, it matches the root's basename (e.g., "Temp" for "C:\\Temp").
+        - If not matched, it checks if the string is contained in the absolute path.
+        If multiple roots match, all of them are scanned.
+
+        Examples:
+        - "Temp"   → only roots whose basename contains "Temp" (e.g., C:\\Temp)
+        - "C:\\Temp" → the C:\\Temp root specifically (if configured)
+        - "all"    → every configured root
+
+    depth : int, default 0
+        0 = only the root (non-recursive). 1 = include one subdirectory level, etc.
+        The server clamps depth internally for safety (currently max = 5).
+    
+    limit: int, default 50
+        Maximum number of files to display **per matched root** (most recent first).
+        Clamped internally (e.g., 1..200) for safety.
+    
+    Returns
+    -------
+    str
+        Human-readable summary. Shows up to 15 most-recent PDFs per matched root.
+        Use `show_accessible_directories()` to see which roots can be matched.
+
+    Notes
+    -----
+    - If your MCP host calls this tool with directory="all", you’ll see every root.
+      To focus on a single root (e.g., C:\\Temp), pass a distinctive filter like "Temp"
+      or "C:\\\\Temp".
+    - This tool is read-only and respects allowed directory, file size, and extension checks.
+    """
+    return list_pdf_files_text(directory, depth, limit)
 
 
 @mcp.tool()
 async def show_accessible_directories() -> str:
     """Return the current directory/configuration constraints as JSON."""
     info = {
-        "accessible_directories": SEARCH_DIRECTORIES,
-        "directory_count": len(SEARCH_DIRECTORIES),
+        "accessible_directories": _paths.SEARCH_DIRECTORIES,
+        "directory_count": len(_paths.SEARCH_DIRECTORIES),
         "max_file_size_mb": MAX_FILE_SIZE // (1024 * 1024),
         "allowed_extensions": ALLOWED_EXTENSIONS,
     }

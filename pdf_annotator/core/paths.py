@@ -116,11 +116,11 @@ def setup_search_directories(args) -> None:
 
     if not validated:
         logger.warning("No valid directories from arguments; falling back to defaults.")
-        SEARCH_DIRECTORIES = [
-            os.path.realpath(os.path.abspath(os.path.expanduser(d))) for d in DEFAULT_SEARCH_DIRECTORIES
-        ]
-    else:
-        SEARCH_DIRECTORIES = validated
+        validated = [os.path.realpath(os.path.abspath(os.path.expanduser(d))) for d in DEFAULT_SEARCH_DIRECTORIES]
+    
+    # IMPORTANT: mutate in place so other modules see the update
+    SEARCH_DIRECTORIES.clear()
+    SEARCH_DIRECTORIES.extend(validated)
 
 
 def validate_and_resolve_path(file_path: str) -> Optional[Path]:
@@ -181,31 +181,119 @@ def find_file(file_name: str) -> Optional[Path]:
     return None
 
 
-def list_pdf_files_text(directory: str = "all") -> str:
-    """Return a human-readable English list of PDFs in the configured directories."""
+def _gather_pdfs_under(root: str, depth: int):
+    """Yield Path objects for PDFs under `root` up to `depth` levels (0 = only root)."""
+    from pathlib import Path as _Path
+    import os as _os
+
+    root = _os.path.realpath(root)
+    if depth <= 0:
+        p = _Path(root)
+        for f in p.glob("*.pdf"):
+            if f.is_file():
+                yield f
+        return
+
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+        rel = _os.path.relpath(dirpath, root)
+        current_depth = 0 if rel == "." else rel.count(_os.sep) + 1
+        if current_depth > depth:
+            dirnames[:] = []  # stop descending further
+            continue
+        for fn in filenames:
+            if fn.lower().endswith(".pdf"):
+                fp = _os.path.join(dirpath, fn)
+                f = _Path(fp)
+                if f.is_file():
+                    yield f
+
+
+def _resolve_subdir_target(directory_filter: str) -> Optional[str]:
+    """
+    If `directory_filter` looks like a filesystem path, resolve/normalize it and
+    return it only if it is a directory under any allowed root. Otherwise None.
+    """
+    try:
+        looks_like_path = (os.path.isabs(directory_filter)
+                           or os.sep in directory_filter
+                           or (os.altsep and os.altsep in directory_filter))
+        if not looks_like_path:
+            return None
+
+        cand = os.path.realpath(os.path.abspath(os.path.expanduser(directory_filter)))
+        if not os.path.isdir(cand):
+            return None
+
+        # must be under one of the allowed roots
+        for root in SEARCH_DIRECTORIES:
+            if _is_within(root, cand):
+                return cand
+        return None
+    except Exception:
+        return None
+
+
+def list_pdf_files_text(directory: str = "all", depth: int = 0, limit: int = 50) -> str:
+    """
+    Build the human-readable listing used by `list_pdf_files`.
+
+    `directory` behaves as a substring filter on allowed roots
+    (basename first, then absolute path). "all" scans every root.
+    `depth` controls recursion (0 = root only), clamped for safety.
+    """
     try:
         results: List[str] = []
         dirs = SEARCH_DIRECTORIES
 
+        # Safety clamp for recursion depth (0 = only root; capped at 5)
+        depth_clamped = max(0, min(int(depth), 5))
+        # Safety clamp for per-root display count
+        limit_clamped = max(1, min(int(limit), 200))
+
         if directory != "all":
-            filtered = [
-                d for d in SEARCH_DIRECTORIES if directory.lower() in os.path.basename(d).lower() or directory in d
-            ]
-            dirs = filtered or []
-            if not dirs:
-                return f"Error: No accessible directory matched '{directory}'."
+            # 1) Path-like? Treat as a subdirectory request under an allowed root.
+            subdir = _resolve_subdir_target(directory)
+            if subdir:
+                dirs = [subdir]  # scan only this subdirectory as the "root"
+                heading_label = os.path.basename(subdir) or subdir
+            else:
+                # 2) Fallback: substring match on allowed roots
+                filtered = [
+                    d for d in SEARCH_DIRECTORIES
+                    if directory.lower() in os.path.basename(d).lower() or directory in d
+                ]
+                dirs = filtered or []
+                if not dirs:
+                    return f"Error: No accessible directory matched '{directory}'."
 
         total = 0
         for d in dirs:
             p = Path(d)
             if not p.is_dir():
                 continue
-            files = [f for f in p.glob("*.pdf") if f.is_file()]
-            files_sorted = sorted(files, key=lambda x: x.stat().st_mtime, reverse=True)[:15]
-            results.append(f"[{os.path.basename(d) or d}] PDF files (showing up to 15 most recent of {len(files)} total):")
+            files = list(_gather_pdfs_under(d, depth_clamped))
+            files_sorted = sorted(files, key=lambda x: x.stat().st_mtime, reverse=True)[:limit_clamped]
+            label = os.path.basename(d) or d
+            results.append(
+                f"[{label}] PDF files (depth={depth_clamped}; "
+                f"showing up to {limit_clamped} most recent of {len(files)} total):"
+            )
             for pdf in files_sorted:
                 size_mb = pdf.stat().st_size / 1024**2
-                results.append(f"- {pdf.name} ({size_mb:.1f} MB)")
+                # Show relative path from the root directory for better readability
+                try:
+                    relative_path = pdf.relative_to(d)
+                    if str(relative_path) == pdf.name:
+                        # File is directly in root directory, just show name
+                        path_display = pdf.name
+                    else:
+                        # File is in subdirectory, show relative path
+                        path_display = f"{relative_path} → {pdf.name}"
+                except ValueError:
+                    # Fallback to absolute path if relative_to fails
+                    path_display = f"{pdf.name} → {str(pdf)}"
+                
+                results.append(f"- {path_display} ({size_mb:.1f} MB)")
             results.append("")
             total += len(files)
 
