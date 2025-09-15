@@ -1,4 +1,4 @@
-# PDF Annotator MCP Server
+# PDF Memo MCP Server
 
 A Model Context Protocol (MCP) server that lets Claude (or any MCP client) work with your PDFs safely. It can **list PDFs**, **extract highlights with their exact text**, **return raw notes/annotations**, **read specific pages**, and **show metadata**—all strictly limited to the directories you allow.
 
@@ -28,8 +28,8 @@ mcp>=0.4.0
 # 1) Clone this repo
 # Windows PowerShell / macOS / Linux
 cd <your-workspace>
-git clone <this-repo-url> pdf-annotator-mcp
-cd pdf-annotator-mcp
+git clone <this-repo-url> pdf-memo-mcp
+cd pdf-memo-mcp
 
 # 2) (Optional) Create a virtualenv
 python -m venv .venv
@@ -57,7 +57,7 @@ python main.py --allow-dir ~/Downloads --allow-dir C:\\Temp
 python main.py ~/Downloads --max-file-size 52428800 --log-level DEBUG
 ```
 
-> Tip (Windows): If you run into import issues while developing, ensure your repo root is on `PYTHONPATH`, e.g. `set PYTHONPATH=C:\\mcp-servers\\pdf-annotator-mcp`.
+> Tip (Windows): If you run into import issues while developing, ensure your repo root is on `PYTHONPATH`, e.g. `set PYTHONPATH=C:\\mcp-servers\\pdf-memo-mcp`.
 
 ## Claude Desktop integration
 
@@ -66,15 +66,15 @@ Create or update your `claude_desktop_config.json` to register this MCP server. 
 ```jsonc
 {
   "mcpServers": {
-    "pdf-annotator": {
+    "pdf-memo": {
       "command": "C:/Users/yong/AppData/Local/Programs/Python/Python311/python.exe",
       "args": [
-        "C:/mcp-servers/pdf-annotator-mcp/main.py",
+        "C:/mcp-servers/pdf-memo-mcp/main.py",
         "~/Downloads",
         "C:/Temp"
       ],
       "env": {
-        "PYTHONPATH": "C:/mcp-servers/pdf-annotator-mcp"
+        "PYTHONPATH": "C:/mcp-servers/pdf-memo-mcp"
       }
     }
   }
@@ -86,15 +86,15 @@ Create or update your `claude_desktop_config.json` to register this MCP server. 
 ```jsonc
 {
   "mcpServers": {
-    "pdf-annotator": {
+    "pdf-memo": {
       "command": "/usr/bin/python3",
       "args": [
-        "/Users/you/mcp-servers/pdf-annotator-mcp/main.py",
+        "/Users/you/mcp-servers/pdf-memo-mcp/main.py",
         "~/Downloads",
         "/Users/you/PDFs"
       ],
       "env": {
-        "PYTHONPATH": "/Users/you/mcp-servers/pdf-annotator-mcp"
+        "PYTHONPATH": "/Users/you/mcp-servers/pdf-memo-mcp"
       }
     }
   }
@@ -142,7 +142,7 @@ Ask natural-language prompts like:
 
 ## Troubleshooting
 
-* **`ModuleNotFoundError: No module named 'pdf_annotator'`**
+* **`ModuleNotFoundError: No module named 'pdf_memo'`**
   Ensure your repo root is on `PYTHONPATH` (see examples above) or run `main.py` from the repo root. This repo also injects `sys.path` in `main.py` for convenience.
 
 * **No highlights found**
