@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PDF Annotator MCP Server (modular)
+PDF Memo MCP Server (modular)
 - Keeps the original separated tool behavior
 - Adds: configurable directories, show_accessible_directories, flexible page_range, metadata
 """
@@ -21,7 +21,7 @@ if __name__ == "__main__":
     logging.getLogger().setLevel(getattr(logging, args.log_level))
     setup_search_directories(args)
 
-    logging.info("Starting PDF Annotator MCP server...")
+    logging.info("Starting PDF Memo MCP server...")
     logging.info("Accessible directories: %s", " ; ".join(SEARCH_DIRECTORIES))
 
     mcp.run(transport="stdio")
